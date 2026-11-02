@@ -75,7 +75,12 @@ public final class JtmfScenarioSync {
         for (String id : ids) {
             List<Match> matches = index.getOrDefault(id, List.of());
             if (matches.size() == 1) selected.add(matches.get(0));
-            else problems.add(id + (matches.isEmpty() ? " - missing matching @tag/Examples" : " - ambiguous: " + matches.size() + " matches"));
+            else if (matches.isEmpty()) problems.add(id + " - no matching active @tag/Examples found");
+            else {
+                StringJoiner locations = new StringJoiner(", ");
+                for (Match m : matches) locations.add(project.relativize(m.file) + ":" + m.line);
+                problems.add(id + " - ambiguous: " + matches.size() + " matches at " + locations);
+            }
         }
         for (Match m : selected) System.out.printf("MATCH %-22s %s:%d (%s)%n", m.key, project.relativize(m.file), m.line, m.type);
         if (!problems.isEmpty()) {
@@ -196,13 +201,35 @@ public final class JtmfScenarioSync {
     private static boolean isScenario(String line) { return SCENARIO.matcher(line).matches(); }
     private static boolean isExamples(String line) { return EXAMPLES.matcher(line).matches(); }
     private static int tagStart(List<String> lines, int heading, int floor) {
+        // A group of Examples tags may include disabled tags such as
+        //   @PROJECT-123
+        //   # @PROJECT-999
+        //   Examples:
+        // The disabled tag must NOT break association with the active one.
         int pos = heading;
-        while (pos > floor && lines.get(pos - 1).isBlank()) pos--;
-        while (pos > floor && isTag(lines.get(pos - 1))) {
-            pos--;
-            while (pos > floor && lines.get(pos - 1).isBlank()) pos--;
+        boolean foundActiveTag = false;
+        while (pos > floor) {
+            String previous = lines.get(pos - 1).strip();
+            if (isTag(previous)) {
+                foundActiveTag = true;
+                pos--;
+            } else if (previous.isEmpty() || previous.startsWith("#")) {
+                pos--;
+            } else {
+                break;
+            }
         }
-        return pos;
+        return foundActiveTag ? pos : heading;
+    }
+    private static String exampleBlock(List<String> lines, int from, int to) {
+        // Disabled ID tags must never be sent to Jira as active test metadata.
+        StringBuilder b = new StringBuilder();
+        for (int i = from; i < to; i++) {
+            String line = lines.get(i);
+            if (line.stripLeading().matches("#\\s*@[^\\s]+.*")) continue;
+            b.append(line).append('\n');
+        }
+        return b.toString().stripTrailing();
     }
     private static void add(Map<String, List<Match>> index, Match match) {
         index.computeIfAbsent(match.key, k -> new ArrayList<>()).add(match);
@@ -244,7 +271,7 @@ public final class JtmfScenarioSync {
                     int ex = exs.get(i);
                     int exStart = tagStart(lines, ex, head + 1);
                     int exEnd = i + 1 < exs.size() ? tagStart(lines, exs.get(i + 1), ex + 1) : end;
-                    String example = join(lines, exStart, exEnd).stripTrailing();
+                    String example = exampleBlock(lines, exStart, exEnd);
                     String body = common + "\n\n" + example + "\n";
                     Set<String> caseIds = tags(lines, exStart, ex);
                     for (String id : caseIds)
